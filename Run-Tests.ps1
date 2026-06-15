@@ -1,17 +1,18 @@
+[CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    [Parameter(Mandatory = $false)]
+    [string]$ProjectRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path)
 )
+
+$ErrorActionPreference = 'Stop'
+$env:CIS_IIS10_PROJECT_ROOT = $ProjectRoot
 
 Import-Module Pester -MinimumVersion 5.0 -Force
 
+$testPath = Join-Path $ProjectRoot 'Tests'
+
 $config = New-PesterConfiguration
-$config.Run.Path = Join-Path $PSScriptRoot 'Tests'
-$config.Run.PassThru = $true
+$config.Run.Path = $testPath
 $config.Output.Verbosity = 'Detailed'
-$config.TestResult.Enabled = $true
-$config.TestResult.OutputPath = Join-Path $PSScriptRoot 'TestResults.xml'
-$config.TestResult.OutputFormat = 'NUnitXml'
-$config.CodeCoverage.Enabled = $false
-$config.Run.Container = New-PesterContainer -Path (Join-Path $PSScriptRoot 'Tests') -Data @{ ProjectRoot = $ProjectRoot }
 
 Invoke-Pester -Configuration $config

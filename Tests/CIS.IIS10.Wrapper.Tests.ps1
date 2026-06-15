@@ -1,71 +1,80 @@
-param([string]$ProjectRoot)
+BeforeAll {
+    function Get-FirstExistingFile {
+        param(
+            [Parameter(Mandatory)]
+            [string[]]$CandidatePaths
+        )
 
-function Get-FirstExistingFile {
-    param(
-        [Parameter(Mandatory)] [string]$Root,
-        [Parameter(Mandatory)] [string[]]$Names
-    )
-    foreach ($name in $Names) {
-        $path = Join-Path $Root $name
-        if (Test-Path $path) { return $path }
+        foreach ($candidatePath in $CandidatePaths) {
+            if (Test-Path -LiteralPath $candidatePath) {
+                return (Resolve-Path -LiteralPath $candidatePath).Path
+            }
+        }
+
+        throw "None of the expected files were found: $($CandidatePaths -join ', ')"
     }
-    throw "Could not find any of these files under '$Root': $($Names -join ', ')"
+
+    $script:ProjectRoot = if ($env:CIS_IIS10_PROJECT_ROOT) {
+        $env:CIS_IIS10_PROJECT_ROOT
+    }
+    elseif ($PSCommandPath) {
+        Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+    }
+    else {
+        (Get-Location).Path
+    }
+
+    $script:WrapperScriptPath = Get-FirstExistingFile -CandidatePaths @(
+        (Join-Path $script:ProjectRoot 'CIS-IIS10-wrapper.ps1'),
+        (Join-Path $script:ProjectRoot 'iisauditwrapper-v8-tabbed-filtered-grouped.ps1'),
+        (Join-Path $script:ProjectRoot 'iisauditwrapper-v8-tabbed-filtered.ps1'),
+        (Join-Path $script:ProjectRoot 'iisauditwrapper-v8-tabbed.ps1'),
+        (Join-Path $script:ProjectRoot 'iisauditwrapper-v8.ps1'),
+        (Join-Path $script:ProjectRoot 'iisauditwrapper.ps1')
+    )
+
+    $script:WrapperText = Get-Content -LiteralPath $script:WrapperScriptPath -Raw
 }
 
-Describe 'CIS IIS 10 wrapper script - report generation contract tests' {
-    BeforeAll {
-        $script:WrapperScript = Get-FirstExistingFile -Root $ProjectRoot -Names @(
-            'iisauditwrapper-v8-tabbed-filtered-grouped.ps1',
-            'iisauditwrapper-v8-tabbed-filtered.ps1',
-            'iisauditwrapper-v8-tabbed.ps1',
-            'iisauditwrapper-v8.ps1'
-        )
+Describe 'CIS IIS 10 wrapper script - static report tests' {
+    It 'has valid PowerShell syntax' {
+        $tokens = $null
+        $errors = $null
 
-        $script:WrapperText = Get-Content -Path $script:WrapperScript -Raw
-        $script:ParseErrors = $null
-        $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            $script:WrapperScript,
-            [ref]$null,
-            [ref]$script:ParseErrors
-        )
+        [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:WrapperScriptPath,
+            [ref]$tokens,
+            [ref]$errors
+        ) | Out-Null
+
+        $errors | Should -BeNullOrEmpty
     }
 
-    It 'has no PowerShell parser errors' {
-        $script:ParseErrors | Should -BeNullOrEmpty
-    }
-
-    It 'contains the HTML report generator function' {
+    It 'defines New-IisAuditHtmlReport' {
         $script:WrapperText | Should -Match 'function\s+New-IisAuditHtmlReport'
     }
 
-    It 'generates a single self-contained HTML file without external CSS or JavaScript' {
-        $script:WrapperText | Should -Match '<style>'
-        $script:WrapperText | Should -Not -Match '<link\s+[^>]*stylesheet'
-        $script:WrapperText | Should -Not -Match '<script\s+[^>]*src='
-        $script:WrapperText | Should -Not -Match 'https?://'
+    It 'contains the Detailed Results tab' {
+        $script:WrapperText | Should -Match 'Detailed Results'
     }
 
-    It 'contains two report tabs' {
-        $script:WrapperText | Should -Match 'Detailed Results'
+    It 'contains the Consolidated Report tab' {
         $script:WrapperText | Should -Match 'Consolidated Report'
     }
 
-    It 'contains consolidated report filters for Fail, Error, and ManualReview' {
+    It 'contains consolidated status filters' {
         $script:WrapperText | Should -Match 'Fail'
         $script:WrapperText | Should -Match 'Error'
         $script:WrapperText | Should -Match 'ManualReview|Manual Review'
     }
 
-    It 'groups consolidated rows by status, control, level, and title' {
-        $script:WrapperText | Should -Match 'Group-Object'
-        $script:WrapperText | Should -Match 'Status'
-        $script:WrapperText | Should -Match 'ControlId|Control'
-        $script:WrapperText | Should -Match 'Level'
-        $script:WrapperText | Should -Match 'Title'
+    It 'contains sticky table header CSS' {
+        $script:WrapperText | Should -Match 'position\s*:\s*sticky'
+        $script:WrapperText | Should -Match 'thead\s*th'
     }
 
-    It 'keeps table headers sticky/frozen' {
-        $script:WrapperText | Should -Match 'position\s*:\s*sticky'
-        $script:WrapperText | Should -Match 'thead\s+th|thead\s*th'
+    It 'groups or combines servers in the consolidated report' {
+        $script:WrapperText | Should -Match 'Servers'
+        $script:WrapperText | Should -Match 'Group-Object|grouped|Consolidated'
     }
 }

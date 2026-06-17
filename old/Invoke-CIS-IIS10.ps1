@@ -7,7 +7,7 @@
     and generates the combined HTML report.
 
     Status values:
-      Pass, Fail, ManualReview, NotApplicable, Error, FalsePositive
+      Pass, Fail, ManualReview, NotApplicable, Error
 
     This script follows the CIS IIS 10 Benchmark v1.2.1 audit/remediation command style where PowerShell commands are provided by CIS. Manual CIS controls are
     returned as Pass/Fail where the CIS PDF provides a clear PowerShell-verifiable value; otherwise returned as ManualReview when human judgement is required.
@@ -27,7 +27,7 @@ function Add-CisResult {
         [Parameter(Mandatory)][string]$Level,
         [Parameter(Mandatory)][string]$Title,
         [Parameter(Mandatory)][ValidateSet('Automated','Manual')][string]$AuditType,
-        [Parameter(Mandatory)][ValidateSet('Pass','Fail','ManualReview','NotApplicable','Error','FalsePositive')][string]$Status,
+        [Parameter(Mandatory)][ValidateSet('Pass','Fail','ManualReview','NotApplicable','Error')][string]$Status,
         [string]$Scope = 'Server',
         [string]$Evidence = '',
         [string]$Expected = '',
@@ -75,49 +75,6 @@ function Invoke-CisCheck {
             -Expected 'The check should complete successfully.' `
             -Remediation 'Review permissions, IIS feature availability, and the exact CIS command for this control.'
     }
-}
-
-
-function Test-IisHasSitesOrApps {
-    <#
-    .SYNOPSIS
-        Returns $true when IIS has at least one site or application object.
-
-    .NOTES
-        Some CIS-CAT IIS checks evaluate site/application-scoped items using "At Least One Exists".
-        On brand-new IIS servers with no deployed sites/apps, CIS-CAT may report "No matching system items were found"
-        even when the server-level APPHOST setting is configured correctly.
-    #>
-
-    $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
-
-    if (-not (Test-Path $appcmd)) {
-        return $false
-    }
-
-    $sites = @(& $appcmd list site 2>$null)
-    $apps  = @(& $appcmd list app 2>$null)
-
-    $hasSites = @($sites | Where-Object { $_ -match '^\s*SITE\s+' }).Count -gt 0
-    $hasApps  = @($apps  | Where-Object { $_ -match '^\s*APP\s+'  }).Count -gt 0
-
-    return ($hasSites -or $hasApps)
-}
-
-function Get-CisStatusForEmptyIis {
-    param(
-        [Parameter(Mandatory)][bool]$HasExpectedValue
-    )
-
-    if (-not $HasExpectedValue) {
-        return 'Fail'
-    }
-
-    if (-not (Test-IisHasSitesOrApps)) {
-        return 'FalsePositive'
-    }
-
-    return 'Pass'
 }
 
 function Get-CisWebProperty {
@@ -350,14 +307,12 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.a
 }
 
 Invoke-CisCheck -ControlId '1.3' -Level 'L1' -AuditType Automated -Title "Ensure 'Directory browsing' is set to Disabled" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.webServer/directoryBrowse /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.webServer/directoryBrowse /enabled:false /commit:apphost'
+    $auditCommand = "Get-WebConfigurationProperty -Filter system.webserver/directorybrowse -PSPath iis:\ -Name Enabled | Select-Object Value"
+    $remediationCommand = "Set-WebConfigurationProperty -Filter system.webserver/directorybrowse -PSPath iis:\ -Name Enabled -Value False"
+    $value = Get-CisWebProperty -PSPath 'IIS:\' -Filter 'system.webServer/directoryBrowse' -Name 'enabled'
+    $status = if ($value -eq $false) { 'Pass' } else { 'Fail' }
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.webServer/directoryBrowse /config:*
-    $hasValue = ($config -match 'enabled="false"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
-
-    Add-CisResult -ControlId '1.3' -Level 'L1' -Title "Ensure 'Directory browsing' is set to Disabled" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'enabled="false" explicitly configured at APPHOST/server level.' -Remediation 'Disable Directory Browsing.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    Add-CisResult -ControlId '1.3' -Level 'L1' -Title "Ensure 'Directory browsing' is set to Disabled" -AuditType Automated -Status $status -Evidence "directoryBrowse.enabled=$value" -Expected 'False' -Remediation 'Disable Directory Browsing at server level.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
 }
 
 Invoke-CisCheck -ControlId '1.4' -Level 'L1' -AuditType Automated -Title "Ensure 'application pool identity' is configured for all application pools" -ScriptBlock {
@@ -365,11 +320,6 @@ Invoke-CisCheck -ControlId '1.4' -Level 'L1' -AuditType Automated -Title "Ensure
     $remediationCommand = @'
 Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.applicationHost/applicationPools/add[@name='<apppool name>']/processModel" -name 'identityType' -value 'ApplicationPoolIdentity'
 '@
-
-    if ($script:AppPools.Count -eq 0) {
-        Add-CisResult -ControlId '1.4' -Level 'L1' -Title "Ensure 'application pool identity' is configured for all application pools" -AuditType Automated -Status FalsePositive -Evidence 'No IIS application pools were found.' -Expected 'Each application pool should use ApplicationPoolIdentity or a documented unique least-privilege identity.' -Remediation 'No action required unless IIS application pools exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
-        return
-    }
 
     foreach ($pool in $script:AppPools) {
         $identityType = [string]$pool.processModel.identityType
@@ -382,11 +332,6 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.a
 Invoke-CisCheck -ControlId '1.5' -Level 'L1' -AuditType Automated -Title "Ensure 'unique application pools' is set for sites" -ScriptBlock {
     $auditCommand = 'Get-Website | Select-Object Name, applicationPool'
     $remediationCommand = "Set-ItemProperty -Path 'IIS:\Sites\<website name>' -Name applicationPool -Value <apppool name>"
-    if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '1.5' -Level 'L1' -Title "Ensure 'unique application pools' is set for sites" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found.' -Expected 'Each site should use a unique, dedicated application pool.' -Remediation 'No action required unless IIS sites exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
-        return
-    }
-
     $groups = @($script:Sites | Group-Object -Property applicationPool)
 
     foreach ($group in $groups) {
@@ -398,14 +343,21 @@ Invoke-CisCheck -ControlId '1.5' -Level 'L1' -AuditType Automated -Title "Ensure
 }
 
 Invoke-CisCheck -ControlId '1.6' -Level 'L1' -AuditType Automated -Title "Ensure 'application pool identity' is configured for anonymous user identity" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.webServer/security/authentication/anonymousAuthentication /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.webServer/security/authentication/anonymousAuthentication /userName:"" /commit:apphost'
+    $auditCommand = "Get-WebConfiguration system.webServer/security/authentication/anonymousAuthentication -Recurse | where {`$_.enabled -eq `$true} | format-list location"
+    $remediationCommand = "Set-ItemProperty -Path IIS:\AppPools\<apppool name> -Name passAnonymousToken -Value True"
+    $anonymousConfigs = @(Get-WebConfiguration 'system.webServer/security/authentication/anonymousAuthentication' -Recurse -ErrorAction Stop | Where-Object { $_.enabled -eq $true })
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.webServer/security/authentication/anonymousAuthentication /config:*
-    $hasValue = ($config -match 'userName=""')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
+    if ($anonymousConfigs.Count -eq 0) {
+        Add-CisResult -ControlId '1.6' -Level 'L1' -Title "Ensure 'application pool identity' is configured for anonymous user identity" -AuditType Automated -Status NotApplicable -Evidence 'No enabled anonymousAuthentication entries found.' -Expected 'Anonymous authentication userName should be blank when enabled.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        return
+    }
 
-    Add-CisResult -ControlId '1.6' -Level 'L1' -Title "Ensure 'application pool identity' is configured for anonymous user identity" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'userName="" explicitly configured at APPHOST/server level.' -Remediation 'Set Anonymous Authentication userName to blank.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    foreach ($config in $anonymousConfigs) {
+        $userName = [string]$config.userName
+        $status = if ([string]::IsNullOrEmpty($userName)) { 'Pass' } else { 'Fail' }
+
+        Add-CisResult -ControlId '1.6' -Level 'L1' -Title "Ensure 'application pool identity' is configured for anonymous user identity" -AuditType Automated -Status $status -Scope "Location: $($config.location)" -Evidence "enabled=$($config.enabled); userName=$userName" -Expected 'anonymousAuthentication userName should be blank.' -Remediation 'Set Anonymous Authentication to use Application Pool Identity.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
 }
 
 Invoke-CisCheck -ControlId '1.7' -Level 'L1' -AuditType Automated -Title "Ensure 'WebDav' feature is disabled" -ScriptBlock {
@@ -466,7 +418,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.3' -Level 'L1' -Title "Ensure 'forms authentication' require SSL" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application using Forms Authentication, requireSSL should be True.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.3' -Level 'L1' -Title "Ensure 'forms authentication' require SSL" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application using Forms Authentication, requireSSL should be True.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -487,7 +439,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.4' -Level 'L2' -Title "Ensure 'forms authentication' is set to use cookies" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application using Forms Authentication, cookieless should be UseCookies.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.4' -Level 'L2' -Title "Ensure 'forms authentication' is set to use cookies" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application using Forms Authentication, cookieless should be UseCookies.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -508,7 +460,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.5' -Level 'L1' -Title "Ensure 'cookie protection mode' is configured for forms authentication" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application using Forms Authentication, protection should be All.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.5' -Level 'L1' -Title "Ensure 'cookie protection mode' is configured for forms authentication" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application using Forms Authentication, protection should be All.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -529,7 +481,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -location '<websi
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.6' -Level 'L1' -Title "Ensure transport layer security for 'basic authentication' is configured" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application using Basic Authentication, SSL should be required.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.6' -Level 'L1' -Title "Ensure transport layer security for 'basic authentication' is configured" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application using Basic Authentication, SSL should be required.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -559,7 +511,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.7' -Level 'L1' -Title "Ensure 'passwordFormat' is not set to clear" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application using forms credentials, passwordFormat should not be Clear.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.7' -Level 'L1' -Title "Ensure 'passwordFormat' is not set to clear" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application using forms credentials, passwordFormat should not be Clear.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -594,7 +546,7 @@ Remove-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>'
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '2.8' -Level 'L2' -Title "Ensure 'credentials' are not stored in configuration files" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'No forms authentication credential user entries should be stored in IIS/application configuration files.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '2.8' -Level 'L2' -Title "Ensure 'credentials' are not stored in configuration files" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'No forms authentication credential user entries should be stored in IIS/application configuration files.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -641,7 +593,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '3.2' -Level 'L2' -Title "Ensure 'debug' is turned off" -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application, compilation debug should be False.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '3.2' -Level 'L2' -Title "Ensure 'debug' is turned off" -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application, compilation debug should be False.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -662,7 +614,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '3.3' -Level 'L2' -Title 'Ensure custom error messages are not off' -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application, customErrors mode should not be Off.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '3.3' -Level 'L2' -Title 'Ensure custom error messages are not off' -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application, customErrors mode should not be Off.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -683,7 +635,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '3.4' -Level 'L1' -Title 'Ensure IIS HTTP detailed errors are hidden from displaying remotely' -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application, errorMode should be DetailedLocalOnly or Custom.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '3.4' -Level 'L1' -Title 'Ensure IIS HTTP detailed errors are hidden from displaying remotely' -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application, errorMode should be DetailedLocalOnly or Custom.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -704,7 +656,7 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/<website name>' -f
 '@
 
     if ($script:Sites.Count -eq 0) {
-        Add-CisResult -ControlId '3.5' -Level 'L2' -Title 'Ensure ASP.NET stack tracing is not enabled' -AuditType Automated -Status FalsePositive -Evidence 'No IIS websites were found. This CIS control is website/application scoped and may be reported by CIS-CAT as no matching system items.' -Expected 'For each website/application, trace enabled should be False.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId '3.5' -Level 'L2' -Title 'Ensure ASP.NET stack tracing is not enabled' -AuditType Automated -Status NotApplicable -Evidence 'No IIS websites were found. This CIS control is website/application scoped.' -Expected 'For each website/application, trace enabled should be False.' -Remediation 'No action required unless IIS websites/applications exist.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
         return
     }
 
@@ -1016,59 +968,68 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/' -filter "system.
 # -----------------------------------------------------------------------------
 # 4 Request Filtering and Other Restriction Modules
 # -----------------------------------------------------------------------------
-Invoke-CisCheck -ControlId '4.1' -Level 'L2' -AuditType Automated -Title "Ensure 'maxAllowedContentLength' is configured" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:requestFiltering'
-    $remediationCommand = 'appcmd.exe set config /section:requestFiltering /requestLimits.maxAllowedContentLength:30000000'
+$RequestLimitChecks = @(
+    @{ Id='4.1'; Level='L2'; Type='Manual';    Title="Ensure 'maxAllowedContentLength' is configured"; Property='maxAllowedContentLength'; Expected='Organisation-approved maximum content length, such as 30000000 bytes.'; RemediationValue='30000000' },
+    @{ Id='4.2'; Level='L2'; Type='Automated'; Title="Ensure 'maxURL request filter' is configured";              Property='maxUrl';                  Expected='4096 or lower unless documented.'; RemediationValue='4096' },
+    @{ Id='4.3'; Level='L2'; Type='Automated'; Title="Ensure 'MaxQueryString request filter' is configured";       Property='maxQueryString';          Expected='2048 or lower unless documented.'; RemediationValue='2048' }
+)
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:requestFiltering
-    $hasValue = ($config -match 'maxAllowedContentLength="30000000"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
+foreach ($check in $RequestLimitChecks) {
+    Invoke-CisCheck -ControlId $check.Id -Level $check.Level -AuditType $check.Type -Title $check.Title -ScriptBlock {
+        $auditCommand = @'
+Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering/requestLimits" -name "$($check.Property)"
+'@
+        $remediationCommand = @'
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering/requestLimits" -name "$($check.Property)" -value $($check.RemediationValue)
+'@
+        $value = Get-CisWebProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/security/requestFiltering/requestLimits' -Name $check.Property
 
-    Add-CisResult -ControlId '4.1' -Level 'L2' -Title "Ensure 'maxAllowedContentLength' is configured" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'maxAllowedContentLength="30000000"' -Remediation 'Set maxAllowedContentLength to the approved value.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
-}
+        if ($check.Id -eq '4.1') {
+            $status = if ($null -ne $value -and [int64]$value -gt 0) { 'Pass' } else { 'Fail' }
+        }
+        elseif ($check.Id -eq '4.2') {
+            $status = if ($null -ne $value -and [int]$value -le 4096) { 'Pass' } else { 'Fail' }
+        }
+        else {
+            $status = if ($null -ne $value -and [int]$value -le 2048) { 'Pass' } else { 'Fail' }
+        }
 
-Invoke-CisCheck -ControlId '4.2' -Level 'L2' -AuditType Automated -Title "Ensure 'maxURL request filter' is configured" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:requestFiltering'
-    $remediationCommand = 'appcmd.exe set config /section:requestFiltering /requestLimits.maxUrl:4096'
-
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:requestFiltering
-    $hasValue = ($config -match 'maxUrl="4096"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
-
-    Add-CisResult -ControlId '4.2' -Level 'L2' -Title "Ensure 'maxURL request filter' is configured" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'maxUrl="4096"' -Remediation 'Set maxUrl to 4096.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
-}
-
-Invoke-CisCheck -ControlId '4.3' -Level 'L2' -AuditType Automated -Title "Ensure 'MaxQueryString request filter' is configured" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:requestFiltering'
-    $remediationCommand = 'appcmd.exe set config /section:requestFiltering /requestLimits.maxQueryString:2048'
-
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:requestFiltering
-    $hasValue = ($config -match 'maxQueryString="2048"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
-
-    Add-CisResult -ControlId '4.3' -Level 'L2' -Title "Ensure 'MaxQueryString request filter' is configured" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'maxQueryString="2048"' -Remediation 'Set maxQueryString to 2048.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+        Add-CisResult -ControlId $check.Id -Level $check.Level -Title $check.Title -AuditType $check.Type -Status $status -Evidence "$($check.Property)=$value" -Expected $check.Expected -Remediation 'Set this request limit to the CIS/example value or an organisation-approved documented value.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
 }
 
 Invoke-CisCheck -ControlId '4.4' -Level 'L2' -AuditType Automated -Title "Ensure non-ASCII characters in URLs are not allowed" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.webServer/security/requestFiltering /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.webServer/security/requestFiltering /allowHighBitCharacters:false /commit:apphost'
+    $auditCommand = @'
+Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/security/requestFiltering' -name 'allowHighBitCharacters'
+'@
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.webServer/security/requestFiltering /config:*
-    $hasValue = ($config -match 'allowHighBitCharacters="false"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
+    $remediationCommand = @'
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering" -name "allowHighBitCharacters" -value "False"
+'@
 
-    Add-CisResult -ControlId '4.4' -Level 'L2' -Title "Ensure non-ASCII characters in URLs are not allowed" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'allowHighBitCharacters="false" explicitly configured at APPHOST/server level.' -Remediation 'Set allowHighBitCharacters to false.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    try {
+        $result = Get-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/security/requestFiltering' -Name 'allowHighBitCharacters' -ErrorAction Stop
+        $value = [string]$result.Value
+        $status = if ($value -eq 'False') { 'Pass' } else { 'Fail' }
+
+        Add-CisResult -ControlId '4.4' -Level 'L2' -Title "Ensure non-ASCII characters in URLs are not allowed" -AuditType Automated -Status $status -Evidence "allowHighBitCharacters='$value'" -Expected 'allowHighBitCharacters should be False.' -Remediation 'Set allowHighBitCharacters to False.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
+    catch {
+        Add-CisResult -ControlId '4.4' -Level 'L2' -Title "Ensure non-ASCII characters in URLs are not allowed" -AuditType Automated -Status 'Error' -Evidence $_.Exception.Message -Expected 'allowHighBitCharacters should be False.' -Remediation 'Set allowHighBitCharacters to False.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
 }
 
 Invoke-CisCheck -ControlId '4.5' -Level 'L1' -AuditType Automated -Title 'Ensure Double-Encoded requests will be rejected' -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:requestFiltering'
-    $remediationCommand = 'appcmd.exe set config /section:requestFiltering /allowDoubleEscaping:false'
+    $auditCommand = @'
+Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering" -name "allowDoubleEscaping"
+'@
+    $remediationCommand = @'
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering" -name "allowDoubleEscaping" -value "False"
+'@
+    $value = Get-CisWebProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/security/requestFiltering' -Name 'allowDoubleEscaping'
+    $status = if ($value -eq $false) { 'Pass' } else { 'Fail' }
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:requestFiltering
-    $hasValue = ($config -match 'allowDoubleEscaping="false"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
-
-    Add-CisResult -ControlId '4.5' -Level 'L1' -Title 'Ensure Double-Encoded requests will be rejected' -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'allowDoubleEscaping="false"' -Remediation 'Set allowDoubleEscaping to false.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    Add-CisResult -ControlId '4.5' -Level 'L1' -Title 'Ensure Double-Encoded requests will be rejected' -AuditType Automated -Status $status -Evidence "allowDoubleEscaping=$value" -Expected 'False' -Remediation 'Set allowDoubleEscaping to False.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
 }
 
 Invoke-CisCheck -ControlId '4.6' -Level 'L1' -AuditType Manual -Title "Ensure 'HTTP Trace Method' is disabled" -ScriptBlock {
@@ -1100,16 +1061,25 @@ Add-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.w
 }
 
 Invoke-CisCheck -ControlId '4.7' -Level 'L1' -AuditType Automated -Title "Ensure Unlisted File Extensions are not allowed" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.webServer/security/requestFiltering /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.webServer/security/requestFiltering /fileExtensions.allowUnlisted:false /commit:apphost'
+    $auditCommand = @'
+Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering/fileExtensions" -name "allowUnlisted"
+'@
 
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.webServer/security/requestFiltering /config:*
-    $hasValue = ($config -match 'allowUnlisted="false"')
-    $status = Get-CisStatusForEmptyIis -HasExpectedValue ([bool]$hasValue)
+    $remediationCommand = @'
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/security/requestFiltering/fileExtensions" -name "allowUnlisted" -value "False"
+'@
 
-    Add-CisResult -ControlId '4.7' -Level 'L1' -Title "Ensure Unlisted File Extensions are not allowed" -AuditType Automated -Status $status -Evidence (("IIS has sites/apps: {0}`r`n" -f (Test-IisHasSitesOrApps)) + ($config -join "`r`n")) -Expected 'fileExtensions allowUnlisted="false" explicitly configured at APPHOST/server level.' -Remediation 'Set fileExtensions.allowUnlisted to false.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    try {
+        $result = Get-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/security/requestFiltering/fileExtensions' -Name 'allowUnlisted' -ErrorAction Stop
+        $value = [string]$result.Value
+        $status = if ($value -eq 'False') { 'Pass' } else { 'Fail' }
+
+        Add-CisResult -ControlId '4.7' -Level 'L1' -Title "Ensure Unlisted File Extensions are not allowed" -AuditType Automated -Status $status -Evidence "fileExtensions allowUnlisted='$value'" -Expected 'allowUnlisted should be False.' -Remediation 'Set fileExtensions allowUnlisted to False, then explicitly allow only required extensions.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
+    catch {
+        Add-CisResult -ControlId '4.7' -Level 'L1' -Title "Ensure Unlisted File Extensions are not allowed" -AuditType Automated -Status 'Error' -Evidence $_.Exception.Message -Expected 'allowUnlisted should be False.' -Remediation 'Set fileExtensions allowUnlisted to False, then explicitly allow only required extensions.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
 }
-
 
 Invoke-CisCheck -ControlId '4.8' -Level 'L1' -AuditType Manual -Title 'Ensure Handler is not granted Write and Script/Execute' -ScriptBlock {
     $auditCommand = @'
@@ -1212,28 +1182,27 @@ Open IIS Manager > select server > Logging > Select Fields > configure required 
     Add-CisResult -ControlId '5.2' -Level 'L1' -Title "Ensure Advanced IIS logging is enabled" -AuditType Automated -Status 'ManualReview' -Evidence 'CIS does not provide a PowerShell command for this check. Verify generated .log files in the Advanced Logs location and confirm required fields are configured.' -Expected 'Advanced IIS logging should generate .log files with required fields.' -Remediation 'Configure Advanced/Enhanced Logging fields in IIS Manager according to organisational logging requirements.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
 }
 
+Invoke-CisCheck -ControlId '5.3' -Level 'L1' -AuditType Manual -Title "Ensure 'ETW Logging' is enabled" -ScriptBlock {
+    $auditCommand = @'
+No PowerShell audit command is provided in CIS IIS 10 Benchmark v1.2.1 for this control.
 
-Invoke-CisCheck -ControlId '5.3' -Level 'L1' -AuditType Automated -Title "Ensure 'ETW Logging' is enabled" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.applicationHost/sites /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.applicationHost/sites /siteDefaults.logFile.logTargetW3C:"File,ETW" /commit:apphost'
+CIS Audit Procedure:
+Using Message Analyzer, configure the query for Microsoft-Windows-IIS-Logging. Verify live logging data by accessing the website.
+'@
 
-    $hasIisItems = Test-IisHasSitesOrApps
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.applicationHost/sites /config:* 2>$null
-    $hasExpectedValue = ($config -match 'logTargetW3C="File,ETW"' -or $config -match 'logTargetW3C="ETW,File"')
+    $remediationCommand = @'
+No PowerShell remediation command is provided in CIS IIS 10 Benchmark v1.2.1 for this control.
 
-    $status = if (-not $hasIisItems) {
-        'FalsePositive'
-    }
-    elseif ($hasExpectedValue) {
-        'Pass'
-    }
-    else {
-        'Fail'
-    }
+CIS Remediation Procedure:
+Open IIS Manager > select server or site > Logging > ensure Log file format is W3C > select Both log file and ETW event > Save.
+'@
 
-    Add-CisResult -ControlId '5.3' -Level 'L1' -Title "Ensure 'ETW Logging' is enabled" -AuditType Automated -Status $status -Evidence ($config -join "`r`n") -Expected 'logTargetW3C includes ETW. If no IIS sites/apps exist, CIS-CAT may treat this as not applicable/pass.' -Remediation 'Enable ETW logging for IIS logging.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    Add-CisResult -ControlId '5.3' -Level 'L1' -Title "Ensure 'ETW Logging' is enabled" -AuditType Manual -Status 'ManualReview' -Evidence 'CIS requires live ETW validation using Message Analyzer or equivalent. Script did not perform a live ETW trace.' -Expected 'Live Microsoft-Windows-IIS-Logging ETW events should be visible when accessing the website.' -Remediation 'Enable Both log file and ETW event in IIS Logging and verify live ETW events.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
 }
 
+# -----------------------------------------------------------------------------
+# 6 FTP Requests
+# -----------------------------------------------------------------------------
 Invoke-CisCheck -ControlId '6.1' -Level 'L1' -AuditType Manual -Title 'Ensure FTP requests are encrypted' -ScriptBlock {
     $auditCommand = @'
 Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.applicationHost/sites/siteDefaults/ftpServer/security/ssl" -name "controlChannelPolicy"
@@ -1280,26 +1249,63 @@ Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.f
 # -----------------------------------------------------------------------------
 # 7 Transport Encryption
 # -----------------------------------------------------------------------------
+Invoke-CisCheck -ControlId '7.1' -Level 'L2' -AuditType Manual -Title "Ensure HSTS Header is set" -ScriptBlock {
+    $auditCommand = @'
+No PowerShell audit command is provided in CIS IIS 10 Benchmark v1.2.1 for this control.
 
-Invoke-CisCheck -ControlId '7.1' -Level 'L2' -AuditType Automated -Title "Ensure HSTS Header is set" -ScriptBlock {
-    $auditCommand = 'appcmd.exe list config /section:system.webServer/httpProtocol /config:*'
-    $remediationCommand = 'appcmd.exe set config /section:system.webServer/httpProtocol /+"customHeaders.[name=''Strict-Transport-Security'',value=''max-age=31536000; includeSubDomains'']" /commit:apphost'
+CIS Audit Procedure:
+IIS Manager > HTTP Response Headers > verify an entry named Strict-Transport-Security exists and its value contains max-age greater than 0.
+'@
 
-    $hasIisItems = Test-IisHasSitesOrApps
-    $config = & "$env:windir\system32\inetsrv\appcmd.exe" list config /section:system.webServer/httpProtocol /config:* 2>$null
-    $hasExpectedValue = ($config -match 'name="Strict-Transport-Security"')
+    $remediationCommand = @'
+%systemroot%\system32\inetsrv\appcmd.exe set config -section:system.webServer/httpProtocol /+"customHeaders.[name='Strict-Transport-Security',value='max-age=480; preload']"
+'@
 
-    $status = if (-not $hasIisItems) {
-        'FalsePositive'
+    try {
+        $headers = @(Get-WebConfiguration -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/httpProtocol/customHeaders/add' -ErrorAction SilentlyContinue)
+        $hsts = @($headers | Where-Object { [string]$_.name -eq 'Strict-Transport-Security' })
+
+        if ($hsts.Count -eq 0) {
+            $status = 'ManualReview'
+            $evidence = 'No server-level Strict-Transport-Security custom header was found. Check site/application-level headers manually as required by CIS.'
+        }
+        else {
+            $values = @($hsts | ForEach-Object { [string]$_.value })
+            $hasMaxAge = $false
+
+            foreach ($value in $values) {
+                if ($value -match 'max-age\s*=\s*(\d+)' -and [int]$Matches[1] -gt 0) {
+                    $hasMaxAge = $true
+                }
+            }
+
+            $status = if ($hasMaxAge) { 'Pass' } else { 'Fail' }
+            $evidence = "Strict-Transport-Security header value(s): $($values -join '; ')"
+        }
+
+        Add-CisResult -ControlId '7.1' -Level 'L2' -Title "Ensure HSTS Header is set" -AuditType Manual -Status $status -Evidence $evidence -Expected 'Strict-Transport-Security header should exist with max-age greater than 0.' -Remediation 'Add Strict-Transport-Security header with max-age greater than 0, such as max-age=480; preload.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
     }
-    elseif ($hasExpectedValue) {
-        'Pass'
+    catch {
+        Add-CisResult -ControlId '7.1' -Level 'L2' -Title "Ensure HSTS Header is set" -AuditType Manual -Status 'Error' -Evidence $_.Exception.Message -Expected 'Strict-Transport-Security header should exist with max-age greater than 0.' -Remediation 'Add Strict-Transport-Security header with max-age greater than 0, such as max-age=480; preload.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
     }
-    else {
-        'Fail'
-    }
+}
 
-    Add-CisResult -ControlId '7.1' -Level 'L2' -Title "Ensure HSTS Header is set" -AuditType Automated -Status $status -Evidence ($config -join "`r`n") -Expected 'Strict-Transport-Security header configured. If no IIS sites/apps exist, CIS-CAT may treat this as not applicable/pass.' -Remediation 'Configure Strict-Transport-Security response header.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+$ProtocolChecks = @(
+    @{ Id='7.2'; Protocol='SSL 2.0'; Expected='Disabled'; Value='0' },
+    @{ Id='7.3'; Protocol='SSL 3.0'; Expected='Disabled'; Value='0' },
+    @{ Id='7.4'; Protocol='TLS 1.0'; Expected='Disabled'; Value='0' },
+    @{ Id='7.5'; Protocol='TLS 1.1'; Expected='Disabled'; Value='0' }
+)
+
+foreach ($protocolCheck in $ProtocolChecks) {
+    Invoke-CisCheck -ControlId $protocolCheck.Id -Level 'L1' -AuditType Automated -Title "Ensure $($protocolCheck.Protocol) is Disabled" -ScriptBlock {
+        $auditCommand = "Get-ItemProperty -path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\$($protocolCheck.Protocol)\Server' -name 'Enabled'"
+        $remediationCommand = "Create Server and Client protocol subkeys for $($protocolCheck.Protocol); set Enabled=0 and DisabledByDefault=1."
+        $result = Test-SchannelProtocolDisabled -Protocol $protocolCheck.Protocol
+        $status = if ($result.IsCompliant) { 'Pass' } else { 'Fail' }
+
+        Add-CisResult -ControlId $protocolCheck.Id -Level 'L1' -Title "Ensure $($protocolCheck.Protocol) is Disabled" -AuditType Automated -Status $status -Evidence $result.Evidence -Expected 'Server and Client Enabled=0, DisabledByDefault=1.' -Remediation 'Set SCHANNEL protocol registry values as defined by CIS and reboot.' -CisAuditCommand $auditCommand -CisRemediationCommand $remediationCommand
+    }
 }
 
 Invoke-CisCheck -ControlId '7.6' -Level 'L1' -AuditType Automated -Title 'Ensure TLS 1.2 is Enabled' -ScriptBlock {

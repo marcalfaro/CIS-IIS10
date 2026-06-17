@@ -70,7 +70,6 @@ function New-IisAuditHtmlReport {
     $manual = (@($safeRows | Where-Object Status -eq 'ManualReview')).Count
     $na     = (@($safeRows | Where-Object Status -eq 'NotApplicable')).Count
     $err    = (@($safeRows | Where-Object Status -eq 'Error')).Count
-    $fp     = (@($safeRows | Where-Object Status -eq 'FalsePositive')).Count
 
     $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
@@ -81,7 +80,6 @@ function New-IisAuditHtmlReport {
             'ManualReview'  { 'manual' }
             'NotApplicable' { 'na' }
             'Error'         { 'error' }
-            'FalsePositive' { 'falsepositive' }
             default         { 'other' }
         }
 
@@ -90,7 +88,7 @@ function New-IisAuditHtmlReport {
 
     $consolidatedRows = @(
         $safeRows |
-            Where-Object { $_.Status -in @('Fail', 'Error', 'ManualReview', 'FalsePositive') } |
+            Where-Object { $_.Status -in @('Fail', 'Error', 'ManualReview') } |
             Group-Object -Property Status, ControlId, Level, Title |
             ForEach-Object {
                 $groupRows = @($_.Group)
@@ -116,7 +114,6 @@ function New-IisAuditHtmlReport {
                         'Fail'         { 1 }
                         'Error'        { 2 }
                         'ManualReview' { 3 }
-                        'FalsePositive'{ 4 }
                         default        { 9 }
                     }
                 }
@@ -128,7 +125,6 @@ function New-IisAuditHtmlReport {
             'Fail'         { 'fail' }
             'ManualReview' { 'manual' }
             'Error'        { 'error' }
-            'FalsePositive'{ 'falsepositive' }
             default        { 'other' }
         }
 
@@ -136,13 +132,8 @@ function New-IisAuditHtmlReport {
     }
 
     if ($consolidatedRowHtml.Count -eq 0) {
-        $consolidatedRowHtml = @("<tr class='consolidated-empty-row'><td colspan='5'>No Fail, Error, ManualReview, or FalsePositive rows found.</td></tr>")
+        $consolidatedRowHtml = @("<tr class='consolidated-empty-row'><td colspan='5'>No Fail, Error, or ManualReview rows found.</td></tr>")
     }
-
-    $conFailCount   = (@($consolidatedRows | Where-Object Status -eq 'Fail')).Count
-    $conErrorCount  = (@($consolidatedRows | Where-Object Status -eq 'Error')).Count
-    $conManualCount = (@($consolidatedRows | Where-Object Status -eq 'ManualReview')).Count
-    $conFalsePositiveCount = (@($consolidatedRows | Where-Object Status -eq 'FalsePositive')).Count
 
     $html = @"
 <!doctype html>
@@ -157,13 +148,13 @@ body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f8fafc;color:#11
 .report-shell{height:100vh;display:flex;flex-direction:column;padding:18px 24px;gap:12px}
 h1{margin:0 0 2px 0;font-size:24px}.meta{color:#4b5563}.cards{display:flex;gap:12px;flex-wrap:wrap;margin:0}.card{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px #ddd}.num{font-size:22px;font-weight:700}.note{background:#fff7ed;border:1px solid #fed7aa;padding:10px 12px;border-radius:8px;margin:0}
 .tabs{display:flex;gap:0;border-bottom:1px solid #d1d5db;background:#e5e7eb;border-radius:8px 8px 0 0;overflow:hidden}.tab-button{border:0;background:#e5e7eb;padding:11px 16px;cursor:pointer;font-size:14px;color:#111827}.tab-button.active{background:#ffffff;border-bottom:3px solid #1f4e79;font-weight:700}.tab-content{display:none;flex:1;min-height:0}.tab-content.active{display:flex;flex-direction:column;gap:8px}.tab-heading{margin:0;font-size:16px}.tab-help{margin:0;color:#4b5563;font-size:13px}
-.filter-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0 4px 0}.filter-label{font-size:13px;color:#4b5563;margin-right:4px}.filter-button{border:1px solid #d1d5db;background:white;border-radius:999px;padding:7px 12px;cursor:pointer;font-size:13px}.filter-button.active{font-weight:700;border-color:#1f4e79;box-shadow:0 0 0 2px rgba(31,78,121,.15)}.filter-button[data-status='Fail'].active{background:#fee2e2}.filter-button[data-status='Error'].active{background:#fecaca}.filter-button[data-status='ManualReview'].active{background:#fef3c7}.filter-button[data-status='FalsePositive'].active{background:#ede9fe}.hidden-row{display:none}.no-filter-results td{font-weight:700;color:#4b5563;background:#f9fafb}
+.filter-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0 4px 0}.filter-label{font-size:13px;color:#4b5563;margin-right:4px}.filter-button{border:1px solid #d1d5db;background:white;border-radius:999px;padding:7px 12px;cursor:pointer;font-size:13px}.filter-button.active{font-weight:700;border-color:#1f4e79;box-shadow:0 0 0 2px rgba(31,78,121,.15)}.filter-button[data-status='Fail'].active{background:#fee2e2}.filter-button[data-status='Error'].active{background:#fecaca}.filter-button[data-status='ManualReview'].active{background:#fef3c7}.hidden-row{display:none}.no-filter-results td{font-weight:700;color:#4b5563;background:#f9fafb}
 .table-wrap{flex:1;min-height:0;width:100%;overflow:auto;background:white;border:1px solid #e5e7eb;border-radius:0 0 8px 8px;position:relative}
 table{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;background:white;font-size:12px}
 .details-table{min-width:1900px}.consolidated-table{min-width:900px}
 thead th{position:sticky;top:0;z-index:50;background:#111827;color:white;border-top:0;box-shadow:0 2px 4px rgba(0,0,0,.25)}
 th,td{border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:7px;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:break-word;text-align:left}
-th:first-child,td:first-child{border-left:0}.pass td:nth-child(5),.pass-status{background:#dcfce7;font-weight:700}.fail td:nth-child(5),.fail-status{background:#fee2e2;font-weight:700}.manual td:nth-child(5),.manual-status{background:#fef3c7;font-weight:700}.na td:nth-child(5){background:#e0f2fe;font-weight:700}.error td:nth-child(5),.error-status{background:#fecaca;font-weight:700}.falsepositive td:nth-child(5),.falsepositive-status{background:#ede9fe;font-weight:700}
+th:first-child,td:first-child{border-left:0}.pass td:nth-child(5),.pass-status{background:#dcfce7;font-weight:700}.fail td:nth-child(5),.fail-status{background:#fee2e2;font-weight:700}.manual td:nth-child(5),.manual-status{background:#fef3c7;font-weight:700}.na td:nth-child(5){background:#e0f2fe;font-weight:700}.error td:nth-child(5),.error-status{background:#fecaca;font-weight:700}
 @media(max-width:900px){.report-shell{padding:10px}.cards{gap:8px}.card{padding:8px 12px}table{font-size:11px}.details-table{min-width:1500px}.consolidated-table{min-width:760px}}
 </style>
 <script>
@@ -210,7 +201,7 @@ window.addEventListener('load', applyConsolidatedFilters);
 <h1>CIS Microsoft IIS 10 Benchmark v1.2.1 Audit Evidence Report</h1>
 <div class='meta'>Generated: $generated &nbsp; | &nbsp; Servers: $((@($remoteServers)).Count)</div>
 <div class='note'><b>Important:</b> This report is a PowerShell evidence collector. Controls marked ManualReview require human validation and should not be counted as automated compliance.</div>
-<div class='cards'><div class='card'><div>Total</div><div class='num'>$total</div></div><div class='card'><div>Pass</div><div class='num'>$pass</div></div><div class='card'><div>Fail</div><div class='num'>$fail</div></div><div class='card'><div>ManualReview</div><div class='num'>$manual</div></div><div class='card'><div>NotApplicable</div><div class='num'>$na</div></div><div class='card'><div>Error</div><div class='num'>$err</div></div><div class='card'><div>FalsePositive</div><div class='num'>$fp</div></div></div>
+<div class='cards'><div class='card'><div>Total</div><div class='num'>$total</div></div><div class='card'><div>Pass</div><div class='num'>$pass</div></div><div class='card'><div>Fail</div><div class='num'>$fail</div></div><div class='card'><div>ManualReview</div><div class='num'>$manual</div></div><div class='card'><div>NotApplicable</div><div class='num'>$na</div></div><div class='card'><div>Error</div><div class='num'>$err</div></div></div>
 
 <div class='tabs'>
     <button class='tab-button active' onclick="openTab('details', this)">Detailed Results</button>
@@ -236,11 +227,10 @@ $($detailRowHtml -join "`n")
     <p class='tab-help'>Grouped rows requiring attention only. Servers with the same Status, Control, Level, and Title are combined into one row.</p>
     <div class='filter-bar'>
         <span class='filter-label'>Show:</span>
-        <button type='button' class='filter-button active' data-status='Fail' onclick="toggleConsolidatedStatus('Fail', this)">Fail ($conFailCount)</button>
-        <button type='button' class='filter-button active' data-status='Error' onclick="toggleConsolidatedStatus('Error', this)">Error ($conErrorCount)</button>
-        <button type='button' class='filter-button active' data-status='ManualReview' onclick="toggleConsolidatedStatus('ManualReview', this)">Manual Review ($conManualCount)</button>
-        <button type='button' class='filter-button active' data-status='FalsePositive' onclick="toggleConsolidatedStatus('FalsePositive', this)">FalsePositive ($conFalsePositiveCount)</button>
-        </div>
+        <button type='button' class='filter-button active' data-status='Fail' onclick="toggleConsolidatedStatus('Fail', this)">Fail</button>
+        <button type='button' class='filter-button active' data-status='Error' onclick="toggleConsolidatedStatus('Error', this)">Error</button>
+        <button type='button' class='filter-button active' data-status='ManualReview' onclick="toggleConsolidatedStatus('ManualReview', this)">Manual Review</button>
+    </div>
     <div class='table-wrap'>
         <table class='consolidated-table'>
             <colgroup><col style='width:10%'><col style='width:10%'><col style='width:8%'><col style='width:47%'><col style='width:25%'></colgroup>
